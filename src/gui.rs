@@ -601,10 +601,20 @@ impl DeskSwitchApp {
                     .color(ACCENT_BLUE),
             );
             ui.add_space(4.0);
+            let mode_label = if self.virtual_monitor.is_some() {
+                "Extended display (3rd screen)"
+            } else {
+                "Mirror mode (showing existing screen)"
+            };
+            let mode_color = if self.virtual_monitor.is_some() {
+                GREEN
+            } else {
+                YELLOW
+            };
             ui.label(
-                RichText::new("Streaming your screen")
+                RichText::new(mode_label)
                     .font(FontId::proportional(14.0))
-                    .color(TEXT_DIM),
+                    .color(mode_color),
             );
         });
 
