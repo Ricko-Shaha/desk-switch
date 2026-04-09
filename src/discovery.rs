@@ -35,6 +35,17 @@ pub fn get_local_ip() -> String {
         .unwrap_or_else(|_| "127.0.0.1".to_string())
 }
 
+fn get_subnet_broadcast() -> Ipv4Addr {
+    let local_ip = get_local_ip();
+    if let Ok(ip) = local_ip.parse::<Ipv4Addr>() {
+        let octets = ip.octets();
+        // Assume /24 subnet (most home networks)
+        Ipv4Addr::new(octets[0], octets[1], octets[2], 255)
+    } else {
+        Ipv4Addr::BROADCAST
+    }
+}
+
 pub fn start_broadcast(
     discovery_port: u16,
     hostname: String,
@@ -55,11 +66,6 @@ pub fn start_broadcast(
             return;
         }
 
-        let broadcast_addr = SocketAddr::new(
-            std::net::IpAddr::V4(Ipv4Addr::BROADCAST),
-            discovery_port,
-        );
-
         info!("Discovery broadcast started on port {}", discovery_port);
 
         while running.load(std::sync::atomic::Ordering::Relaxed) {
@@ -78,8 +84,18 @@ pub fn start_broadcast(
             };
 
             if let Ok(data) = serde_json::to_vec(&packet) {
-                if let Err(e) = socket.send_to(&data, broadcast_addr) {
-                    debug!("Discovery broadcast send failed: {}", e);
+                // Send to both 255.255.255.255 and subnet broadcast for compatibility
+                let global = SocketAddr::new(
+                    std::net::IpAddr::V4(Ipv4Addr::BROADCAST),
+                    discovery_port,
+                );
+                let subnet = SocketAddr::new(
+                    std::net::IpAddr::V4(get_subnet_broadcast()),
+                    discovery_port,
+                );
+                let _ = socket.send_to(&data, global);
+                if subnet != global {
+                    let _ = socket.send_to(&data, subnet);
                 }
             }
 
@@ -100,7 +116,21 @@ pub fn start_listener(
             std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             discovery_port,
         );
-        let socket = match UdpSocket::bind(addr) {
+
+        // Use socket2 for SO_REUSEADDR before bind
+        let socket = match (|| -> std::io::Result<UdpSocket> {
+            let sock = socket2::Socket::new(
+                socket2::Domain::IPV4,
+                socket2::Type::DGRAM,
+                Some(socket2::Protocol::UDP),
+            )?;
+            sock.set_reuse_address(true)?;
+            #[cfg(target_os = "macos")]
+            sock.set_reuse_port(true)?;
+            sock.set_broadcast(true)?;
+            sock.bind(&addr.into())?;
+            Ok(sock.into())
+        })() {
             Ok(s) => s,
             Err(e) => {
                 warn!("Discovery listener: failed to bind on port {}: {}", discovery_port, e);

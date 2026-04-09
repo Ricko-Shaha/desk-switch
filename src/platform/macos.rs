@@ -11,10 +11,44 @@ pub fn setup_permissions() -> Result<()> {
     println!("  System Settings > Privacy & Security > Screen Recording");
     println!();
 
-    // Attempt to open the relevant preference pane
     let _ = Command::new("open")
         .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
         .spawn();
 
+    add_firewall_exception();
+
     Ok(())
+}
+
+fn add_firewall_exception() {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let exe_str = exe.to_string_lossy().to_string();
+
+    // Remove existing rule, then add as allowed
+    let _ = Command::new("sudo")
+        .args([
+            "/usr/libexec/ApplicationFirewall/socketfilterfw",
+            "--remove",
+            &exe_str,
+        ])
+        .output();
+
+    let _ = Command::new("sudo")
+        .args([
+            "/usr/libexec/ApplicationFirewall/socketfilterfw",
+            "--add",
+            &exe_str,
+        ])
+        .output();
+
+    let _ = Command::new("sudo")
+        .args([
+            "/usr/libexec/ApplicationFirewall/socketfilterfw",
+            "--unblockapp",
+            &exe_str,
+        ])
+        .output();
 }
