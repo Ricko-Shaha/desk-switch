@@ -1,14 +1,14 @@
 use anyhow::{anyhow, Result};
 use log::{info, warn};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::PathBuf;
 
 const VDD_PIPE_NAME: &str = r"\\.\pipe\DeskSwitchVDD";
 const VDD_DRIVER_DIR: &str = r"C:\ProgramData\DeskSwitch\Driver";
 
 pub struct WinVirtualMonitor {
-    width: u32,
-    height: u32,
+    _width: u32,
+    _height: u32,
 }
 
 impl WinVirtualMonitor {
@@ -16,12 +16,10 @@ impl WinVirtualMonitor {
         if !Self::is_driver_installed() {
             return Err(anyhow!(
                 "Virtual Display Driver is not installed.\n\
-                 Run Install.bat to download and install it, or install manually:\n\
-                 1. Download Virtual-Display-Driver from:\n\
-                    https://github.com/VirtualDrivers/Virtual-Display-Driver/releases\n\
-                 2. Extract and run: pnputil /add-driver VirtualDisplayDriver.inf /install\n\
-                 3. You may need to enable test signing:\n\
-                    bcdedit /set testsigning on  (then reboot)"
+                 Install manually:\n\
+                 1. Download from: https://github.com/VirtualDrivers/Virtual-Display-Driver/releases\n\
+                 2. Extract and run as Admin: pnputil /add-driver VirtualDisplayDriver.inf /install\n\
+                 3. You may need: bcdedit /set testsigning on (then reboot)"
             ));
         }
 
@@ -48,7 +46,10 @@ impl WinVirtualMonitor {
 
         info!("Virtual display configuration written to {:?}", config_path);
 
-        Ok(Self { width, height })
+        Ok(Self {
+            _width: width,
+            _height: height,
+        })
     }
 
     pub fn destroy(&mut self) -> Result<()> {
@@ -62,13 +63,11 @@ impl WinVirtualMonitor {
     }
 
     fn is_driver_installed() -> bool {
-        // Check for the driver by looking for its device interface or config directory
         let driver_dir = PathBuf::from(VDD_DRIVER_DIR);
         if driver_dir.exists() {
             return true;
         }
 
-        // Also check via devcon/pnputil output
         match std::process::Command::new("pnputil")
             .args(["/enum-devices", "/class", "Display"])
             .output()
@@ -82,7 +81,6 @@ impl WinVirtualMonitor {
     }
 
     fn signal_driver_reload() -> Result<()> {
-        // Attempt to signal via named pipe (VDD listens for reload commands)
         match std::fs::OpenOptions::new()
             .write(true)
             .open(VDD_PIPE_NAME)
@@ -94,8 +92,6 @@ impl WinVirtualMonitor {
                 Ok(())
             }
             Err(_) => {
-                // Pipe not available; driver may auto-detect config changes
-                // or we need to restart the device
                 warn!("Could not signal VDD driver via pipe. Config will apply on next driver restart.");
                 Self::restart_device()?;
                 Ok(())
