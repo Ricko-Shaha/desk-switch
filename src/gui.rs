@@ -2,6 +2,7 @@ use crate::capture::{self, CaptureSession};
 use crate::config::{load_config, save_config, Config};
 use crate::discovery::{self, PeerMap};
 use crate::protocol::{self, Message, Role, PROTOCOL_VERSION};
+use crate::virtual_display::VirtualMonitor;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use eframe::egui::{
     self, Align2, Button, Color32, CornerRadius, FontId, Frame, Margin, Response, RichText, Sense,
@@ -61,6 +62,7 @@ pub struct DeskSwitchApp {
     discovery_running: bool,
 
     // Primary mode
+    virtual_monitor: Option<VirtualMonitor>,
     capture_session: Option<CaptureSession>,
     primary_handle: Option<thread::JoinHandle<()>>,
     primary_fps: Arc<Mutex<u32>>,
@@ -135,6 +137,7 @@ impl DeskSwitchApp {
             running: Arc::new(AtomicBool::new(true)),
             peers: discovery::new_peer_map(),
             discovery_running: false,
+            virtual_monitor: None,
             capture_session: None,
             primary_handle: None,
             primary_fps: Arc::new(Mutex::new(0)),
@@ -201,19 +204,52 @@ impl DeskSwitchApp {
     fn start_primary(&mut self) {
         self.ensure_discovery();
         self.mode = AppMode::Primary;
-        self.push_log(format!(
-            "Starting PRIMARY mode — capturing display {}",
+
+        let capture_monitor = if self.config.use_virtual_display {
+            self.push_log(format!(
+                "Creating virtual display ({}x{})...",
+                self.config.virtual_display_width, self.config.virtual_display_height
+            ));
+
+            match VirtualMonitor::create(
+                self.config.virtual_display_width,
+                self.config.virtual_display_height,
+                self.config.max_fps,
+            ) {
+                Ok(vm) => {
+                    let idx = vm.display_index;
+                    self.push_log(format!(
+                        "Virtual display created → capturing display {}",
+                        idx
+                    ));
+                    self.virtual_monitor = Some(vm);
+                    idx
+                }
+                Err(e) => {
+                    self.push_log(format!(
+                        "Virtual display unavailable ({}). Falling back to mirror mode — capturing display {}",
+                        e, self.config.capture_monitor
+                    ));
+                    self.config.capture_monitor
+                }
+            }
+        } else {
+            self.push_log(format!(
+                "Starting PRIMARY (mirror) mode — capturing display {}",
+                self.config.capture_monitor
+            ));
             self.config.capture_monitor
-        ));
+        };
 
         let capture = match CaptureSession::start(
-            self.config.capture_monitor,
+            capture_monitor,
             self.config.capture_quality,
             self.config.max_fps,
         ) {
             Ok(c) => c,
             Err(e) => {
                 self.push_log(format!("Capture error: {}", e));
+                self.virtual_monitor = None;
                 self.mode = AppMode::Idle;
                 return;
             }
@@ -279,6 +315,11 @@ impl DeskSwitchApp {
         }
         if let Some(h) = self.display_handle.take() {
             let _ = h.join();
+        }
+
+        if let Some(mut vm) = self.virtual_monitor.take() {
+            self.push_log("Removing virtual display...");
+            let _ = vm.destroy();
         }
 
         self.pixel_rx = None;
@@ -843,6 +884,112 @@ impl DeskSwitchApp {
                         });
                 });
                 self.config.capture_monitor = monitor;
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                // Virtual Display settings
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("Virtual Display")
+                            .color(TEXT)
+                            .font(FontId::proportional(14.0)),
+                    );
+                    ui.add_space(8.0);
+                    let toggle_text = if self.config.use_virtual_display {
+                        "Extended (3rd screen)"
+                    } else {
+                        "Mirror mode"
+                    };
+                    if ui
+                        .add(Button::new(
+                            RichText::new(toggle_text)
+                                .color(if self.config.use_virtual_display {
+                                    GREEN
+                                } else {
+                                    TEXT_DIM
+                                })
+                                .font(FontId::proportional(12.0)),
+                        ))
+                        .clicked()
+                    {
+                        self.config.use_virtual_display = !self.config.use_virtual_display;
+                    }
+                });
+
+                if self.config.use_virtual_display {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(
+                            "Creates a virtual monitor — the other laptop becomes an extra screen, not a mirror.",
+                        )
+                        .color(TEXT_DIM)
+                        .font(FontId::proportional(11.0)),
+                    );
+                    ui.add_space(6.0);
+
+                    let resolutions: Vec<(u32, u32, &str)> = vec![
+                        (1280, 720, "1280x720 (HD)"),
+                        (1920, 1080, "1920x1080 (Full HD)"),
+                        (2560, 1440, "2560x1440 (QHD)"),
+                        (3840, 2160, "3840x2160 (4K)"),
+                    ];
+
+                    let current_label = resolutions
+                        .iter()
+                        .find(|(w, h, _)| {
+                            *w == self.config.virtual_display_width
+                                && *h == self.config.virtual_display_height
+                        })
+                        .map(|(_, _, l)| l.to_string())
+                        .unwrap_or_else(|| {
+                            format!(
+                                "{}x{}",
+                                self.config.virtual_display_width,
+                                self.config.virtual_display_height
+                            )
+                        });
+
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("Resolution")
+                                .color(TEXT_DIM)
+                                .font(FontId::proportional(13.0)),
+                        );
+                        ui.add_space(4.0);
+                        egui::ComboBox::from_id_salt("vd_resolution")
+                            .selected_text(current_label)
+                            .show_ui(ui, |ui| {
+                                for (w, h, label) in &resolutions {
+                                    if ui
+                                        .selectable_label(
+                                            self.config.virtual_display_width == *w
+                                                && self.config.virtual_display_height == *h,
+                                            *label,
+                                        )
+                                        .clicked()
+                                    {
+                                        self.config.virtual_display_width = *w;
+                                        self.config.virtual_display_height = *h;
+                                    }
+                                }
+                            });
+                    });
+                }
+
+                if self.virtual_monitor.is_some() {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        let (rect, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                        ui.painter().circle_filled(rect.center(), 4.0, GREEN);
+                        ui.label(
+                            RichText::new("Virtual display active")
+                                .color(GREEN)
+                                .font(FontId::proportional(12.0)),
+                        );
+                    });
+                }
 
                 ui.add_space(12.0);
                 ui.separator();

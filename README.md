@@ -4,11 +4,14 @@ A cross-platform KVM switch built in Rust. Use two laptops (Windows + Mac) with 
 
 ## Features
 
+- **Extended display (3rd screen)** -- the other laptop becomes a real extra monitor you can drag windows onto, not just a mirror
 - **One-click GUI** -- double-click to launch a beautiful desktop app, pick Primary or Display, done
-- **Screen streaming** -- primary machine captures its screen and streams it to the display machine at up to 30 FPS
+- **Virtual display driver** -- creates a virtual monitor on the primary machine (CGVirtualDisplay on macOS 14+, IddCx on Windows)
+- **Screen streaming** -- captures the virtual monitor and streams it to the display machine at up to 30 FPS
 - **Input forwarding** -- keyboard and mouse events from the display machine are forwarded back to the primary
 - **Role switching** -- toggle which laptop is primary with a single command
 - **Auto-discovery** -- machines find each other on the same WiFi network via UDP broadcast
+- **Mirror mode fallback** -- if virtual display isn't available, falls back to screen mirroring
 - **Auth key** -- shared key prevents unauthorized connections
 - **Single binary** -- GUI + CLI in one executable, no runtime dependencies
 
@@ -22,14 +25,14 @@ A cross-platform KVM switch built in Rust. Use two laptops (Windows + Mac) with 
 ### macOS
 
 1. Clone or download this repo
-2. Double-click **`Install.command`** in Finder
+2. Double-click `**Install.command`** in Finder
 3. It installs Rust (if needed), builds, and creates **Desk Switch.app** in `~/Applications`
 4. The app opens automatically. Find it in Launchpad or `~/Applications` from now on.
 
 ### Windows
 
 1. Clone or download this repo
-2. Double-click **`Install.bat`** in Explorer
+2. Double-click `**Install.bat`** in Explorer
 3. It installs Rust (if needed), builds, and creates shortcuts on **Desktop** and **Start Menu**
 4. The app opens automatically. Click the Desktop shortcut from now on.
 

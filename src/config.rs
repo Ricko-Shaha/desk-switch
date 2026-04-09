@@ -18,7 +18,17 @@ pub struct Config {
     pub capture_monitor: usize,
     pub viewer_monitor: usize,
     pub max_fps: u32,
+    #[serde(default = "default_vd_width")]
+    pub virtual_display_width: u32,
+    #[serde(default = "default_vd_height")]
+    pub virtual_display_height: u32,
+    #[serde(default = "default_true")]
+    pub use_virtual_display: bool,
 }
+
+fn default_vd_width() -> u32 { 1920 }
+fn default_vd_height() -> u32 { 1080 }
+fn default_true() -> bool { true }
 
 impl Default for Config {
     fn default() -> Self {
@@ -36,6 +46,9 @@ impl Default for Config {
             capture_monitor: 0,
             viewer_monitor: 0,
             max_fps: 30,
+            virtual_display_width: 1920,
+            virtual_display_height: 1080,
+            use_virtual_display: true,
         }
     }
 }
@@ -74,6 +87,15 @@ impl Config {
                     anyhow::bail!("FPS must be between 1 and 60");
                 }
                 self.max_fps = fps;
+            }
+            "virtual_display_width" => {
+                self.virtual_display_width = value.parse().context("Invalid width")?;
+            }
+            "virtual_display_height" => {
+                self.virtual_display_height = value.parse().context("Invalid height")?;
+            }
+            "use_virtual_display" => {
+                self.use_virtual_display = value.parse().context("Must be true or false")?;
             }
             _ => anyhow::bail!("Unknown config key: {}", key),
         }

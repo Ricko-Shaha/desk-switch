@@ -7,6 +7,7 @@ mod platform;
 mod protocol;
 mod service;
 mod viewer;
+mod virtual_display;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

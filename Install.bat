@@ -10,7 +10,7 @@ echo.
 
 :: ── 1. Check / Install Rust ──────────────────────────────────
 
-echo [1/4] Checking for Rust...
+echo [1/5] Checking for Rust...
 where cargo >nul 2>&1 && (
     echo       Rust found:
     cargo --version
@@ -45,7 +45,7 @@ echo.
 
 :: ── 2. Build ─────────────────────────────────────────────────
 
-echo [2/4] Building desk-switch (release)...
+echo [2/5] Building desk-switch (release)...
 echo       This takes a few minutes the first time. Please wait...
 echo.
 cargo build --release 2>&1
@@ -59,13 +59,59 @@ echo.
 echo       Build complete.
 echo.
 
-:: ── 3. Install to AppData + Desktop shortcut ─────────────────
+:: ── 3. Install Virtual Display Driver ────────────────────────
+
+echo [3/5] Setting up Virtual Display Driver (for extended display)...
+
+set "VDD_DIR=C:\ProgramData\DeskSwitch\Driver"
+if not exist "%VDD_DIR%" mkdir "%VDD_DIR%"
+
+echo       The Virtual Display Driver lets the other laptop act as an
+echo       extended screen (not just a mirror).
+echo.
+echo       Downloading Virtual Display Driver...
+powershell -ExecutionPolicy Bypass -Command ^
+  "try { " ^
+  "  $releases = Invoke-RestMethod -Uri 'https://api.github.com/repos/VirtualDrivers/Virtual-Display-Driver/releases/latest'; " ^
+  "  $asset = $releases.assets | Where-Object { $_.name -like '*.zip' } | Select-Object -First 1; " ^
+  "  if ($asset) { " ^
+  "    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile '%TEMP%\vdd.zip'; " ^
+  "    Expand-Archive -Path '%TEMP%\vdd.zip' -DestinationPath '%VDD_DIR%' -Force; " ^
+  "    Write-Host '       Driver downloaded.'; " ^
+  "  } else { " ^
+  "    Write-Host '       Could not find driver download.'; " ^
+  "  } " ^
+  "} catch { " ^
+  "  Write-Host '       Driver download failed (extended display may not work).'; " ^
+  "  Write-Host '       You can still use mirror mode.'; " ^
+  "}" 2>nul
+
+:: Try to install the driver (needs admin)
+if exist "%VDD_DIR%\*.inf" (
+    echo       Installing driver (may request Administrator)...
+    powershell -ExecutionPolicy Bypass -Command ^
+      "try { " ^
+      "  $inf = Get-ChildItem '%VDD_DIR%' -Filter '*.inf' -Recurse | Select-Object -First 1; " ^
+      "  if ($inf) { " ^
+      "    Start-Process pnputil -ArgumentList ('/add-driver', $inf.FullName, '/install') -Verb RunAs -Wait; " ^
+      "    Write-Host '       Driver installed.'; " ^
+      "  } " ^
+      "} catch { " ^
+      "  Write-Host '       Driver install skipped (you can install manually later).'; " ^
+      "}" 2>nul
+) else (
+    echo       No driver .inf found. Extended display may require manual setup.
+    echo       See: https://github.com/VirtualDrivers/Virtual-Display-Driver
+)
+echo.
+
+:: ── 4. Install to AppData + Desktop shortcut ─────────────────
 
 set "INSTALL_DIR=%LOCALAPPDATA%\DeskSwitch"
 set "EXE_SRC=target\release\desk-switch.exe"
 set "EXE_DST=%INSTALL_DIR%\desk-switch.exe"
 
-echo [3/4] Installing to %INSTALL_DIR%...
+echo [4/5] Installing to %INSTALL_DIR%...
 
 if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
 copy /y "%EXE_SRC%" "%EXE_DST%" >nul
@@ -85,11 +131,10 @@ powershell -ExecutionPolicy Bypass -Command "$ws = New-Object -ComObject WScript
 echo       Installed. Shortcut on Desktop + Start Menu.
 echo.
 
-:: ── 4. Firewall rules ────────────────────────────────────────
+:: ── 5. Firewall rules ────────────────────────────────────────
 
-echo [4/4] Adding firewall rules (optional, may request Administrator)...
+echo [5/5] Adding firewall rules (optional, may request Administrator)...
 echo       If you see a security warning, you can click Allow or skip it.
-echo       The app will still work — Windows will prompt you on first connection.
 powershell -ExecutionPolicy Bypass -Command "try { Start-Process netsh -ArgumentList 'advfirewall firewall add rule name=DeskSwitch-TCP dir=in action=allow protocol=TCP localport=9876-9877' -Verb RunAs -Wait } catch { }" 2>nul
 powershell -ExecutionPolicy Bypass -Command "try { Start-Process netsh -ArgumentList 'advfirewall firewall add rule name=DeskSwitch-UDP dir=in action=allow protocol=UDP localport=9876-9877' -Verb RunAs -Wait } catch { }" 2>nul
 echo       Firewall step done (or skipped).
@@ -105,6 +150,10 @@ echo.
 echo   First time? The auth key is shown in
 echo   the app. Copy it to the other machine
 echo   so they can connect.
+echo.
+echo   Virtual Display: Extended display mode
+echo   lets the other laptop be a 3rd screen.
+echo   Toggle it in Settings.
 echo ══════════════════════════════════════════
 echo.
 

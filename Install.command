@@ -21,21 +21,40 @@ fi
 
 # ── 2. Build ─────────────────────────────────────────────────
 
-echo "[2/4] Building desk-switch (release)... this takes a few minutes the first time."
+echo "[2/5] Building desk-switch (release)... this takes a few minutes the first time."
 cargo build --release
 echo "       Build complete."
 
-# ── 3. Create .app bundle ────────────────────────────────────
+# ── 3. Build virtual display helper ──────────────────────────
+
+echo "[3/5] Building virtual display helper..."
+if [ -f helpers/virtual-display-helper.m ]; then
+    clang -framework Foundation -framework CoreGraphics \
+        -o helpers/virtual-display-helper-bin \
+        helpers/virtual-display-helper.m 2>&1 && \
+        echo "       Helper compiled." || \
+        echo "       Helper compilation failed (virtual display extend may not work)."
+else
+    echo "       Helper source not found (skipping)."
+fi
+
+# ── 4. Create .app bundle ────────────────────────────────────
 
 APP_NAME="Desk Switch"
 APP_DIR="$HOME/Applications/${APP_NAME}.app"
 
-echo "[3/4] Creating ${APP_NAME}.app..."
+echo "[4/5] Creating ${APP_NAME}.app..."
 
 mkdir -p "${APP_DIR}/Contents/MacOS"
 mkdir -p "${APP_DIR}/Contents/Resources"
 
 cp target/release/desk-switch "${APP_DIR}/Contents/MacOS/desk-switch"
+
+# Copy virtual display helper into the bundle
+if [ -f helpers/virtual-display-helper-bin ]; then
+    cp helpers/virtual-display-helper-bin "${APP_DIR}/Contents/MacOS/virtual-display-helper"
+    echo "       Virtual display helper included."
+fi
 
 cat > "${APP_DIR}/Contents/Info.plist" << 'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -162,9 +181,9 @@ fi
 
 echo "       App created at: ${APP_DIR}"
 
-# ── 4. Launch ────────────────────────────────────────────────
+# ── 5. Launch ────────────────────────────────────────────────
 
-echo "[4/4] Launching Desk Switch..."
+echo "[5/5] Launching Desk Switch..."
 echo ""
 echo "╔══════════════════════════════════════════╗"
 echo "║  Installation complete!                  ║"
