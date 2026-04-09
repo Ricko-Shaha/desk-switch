@@ -82,6 +82,7 @@ pub struct DeskSwitchApp {
     // UI state
     show_settings: bool,
     auth_key_copied: Option<Instant>,
+    manual_ip: String,
 }
 
 struct DecodedFrame {
@@ -149,6 +150,7 @@ impl DeskSwitchApp {
             log_tx,
             show_settings: false,
             auth_key_copied: None,
+            manual_ip: String::new(),
         }
     }
 
@@ -466,6 +468,43 @@ impl DeskSwitchApp {
                         ui.painter()
                             .circle_filled(rect.center(), 5.0, dot);
                         ui.label(RichText::new(label).color(TEXT).font(FontId::proportional(13.0)));
+                    });
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new("Can't find peer? Enter IP manually:")
+                            .color(TEXT_DIM)
+                            .font(FontId::proportional(12.0)),
+                    );
+                    ui.horizontal(|ui| {
+                        let te = egui::TextEdit::singleline(&mut self.manual_ip)
+                            .hint_text("e.g. 192.168.1.42")
+                            .font(FontId::monospace(13.0))
+                            .desired_width(180.0);
+                        ui.add(te);
+                        if ui
+                            .add(Button::new(
+                                RichText::new("Connect")
+                                    .color(Color32::WHITE)
+                                    .font(FontId::proportional(13.0)),
+                            ))
+                            .clicked()
+                            && !self.manual_ip.trim().is_empty()
+                        {
+                            let ip = self.manual_ip.trim().to_string();
+                            let port = self.config.stream_port;
+                            let mut peers = self.peers.lock().unwrap();
+                            peers.insert(
+                                ip.clone(),
+                                discovery::PeerInfo {
+                                    hostname: format!("manual ({})", ip),
+                                    ip: ip.clone(),
+                                    role: "primary".to_string(),
+                                    stream_port: port,
+                                    last_seen: Instant::now(),
+                                },
+                            );
+                            let _ = self.log_tx.try_send(format!("Manually added peer: {}", ip));
+                        }
                     });
                 });
             });
