@@ -85,9 +85,12 @@ echo.
 
 :: ── 4. Firewall rules ────────────────────────────────────────
 
-echo [4/4] Adding firewall rules (may request Administrator)...
-powershell -ExecutionPolicy Bypass -Command "Start-Process netsh -ArgumentList 'advfirewall firewall add rule name=DeskSwitch-TCP dir=in action=allow protocol=TCP localport=9876-9877' -Verb RunAs -Wait" 2>nul
-powershell -ExecutionPolicy Bypass -Command "Start-Process netsh -ArgumentList 'advfirewall firewall add rule name=DeskSwitch-UDP dir=in action=allow protocol=UDP localport=9876-9877' -Verb RunAs -Wait" 2>nul
+echo [4/4] Adding firewall rules (optional, may request Administrator)...
+echo       If you see a security warning, you can click Allow or skip it.
+echo       The app will still work — Windows will prompt you on first connection.
+powershell -ExecutionPolicy Bypass -Command "try { Start-Process netsh -ArgumentList 'advfirewall firewall add rule name=DeskSwitch-TCP dir=in action=allow protocol=TCP localport=9876-9877' -Verb RunAs -Wait } catch { }" 2>nul
+powershell -ExecutionPolicy Bypass -Command "try { Start-Process netsh -ArgumentList 'advfirewall firewall add rule name=DeskSwitch-UDP dir=in action=allow protocol=UDP localport=9876-9877' -Verb RunAs -Wait } catch { }" 2>nul
+echo       Firewall step done (or skipped).
 
 echo.
 echo ══════════════════════════════════════════
