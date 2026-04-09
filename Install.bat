@@ -39,6 +39,8 @@ where cargo >nul 2>&1 || (
 echo       Rust installed.
 
 :rust_ok
+echo       Updating Rust to latest version...
+rustup update stable >nul 2>&1
 echo.
 
 :: ── 2. Build ─────────────────────────────────────────────────
