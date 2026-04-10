@@ -10,7 +10,7 @@ echo.
 
 :: ── 1. Check / Install Rust ──────────────────────────────────
 
-echo [1/4] Checking for Rust...
+echo [1/5] Checking for Rust...
 where cargo >nul 2>&1 && (
     echo       Rust found:
     cargo --version
@@ -43,9 +43,55 @@ echo       Updating Rust to latest version...
 rustup update stable >nul 2>&1
 echo.
 
-:: ── 2. Build ─────────────────────────────────────────────────
+:: ── 2. Check / Install build dependencies (cmake, nasm) ──────
 
-echo [2/4] Building desk-switch (release)...
+echo [2/5] Checking build dependencies (cmake, nasm)...
+
+where cmake >nul 2>&1 || (
+    echo       cmake not found. Installing via winget...
+    where winget >nul 2>&1 && (
+        winget install Kitware.CMake --accept-source-agreements --accept-package-agreements -h >nul 2>&1
+        set "PATH=%ProgramFiles%\CMake\bin;%PATH%"
+    ) || (
+        echo       winget not available. Downloading cmake...
+        powershell -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest 'https://github.com/Kitware/CMake/releases/download/v3.31.4/cmake-3.31.4-windows-x86_64.zip' -OutFile '%TEMP%\cmake.zip'; Expand-Archive '%TEMP%\cmake.zip' -DestinationPath '%LOCALAPPDATA%\cmake' -Force"
+        for /d %%d in ("%LOCALAPPDATA%\cmake\cmake-*") do set "PATH=%%d\bin;%PATH%"
+    )
+)
+
+where cmake >nul 2>&1 && (
+    echo       cmake: found
+) || (
+    echo.
+    echo ERROR: cmake is required but could not be installed.
+    echo        Install manually from https://cmake.org/download/
+    echo        Then run Install.bat again.
+    goto :fail
+)
+
+where nasm >nul 2>&1 || (
+    echo       nasm not found. Installing via winget...
+    where winget >nul 2>&1 && (
+        winget install NASM.NASM --accept-source-agreements --accept-package-agreements -h >nul 2>&1
+        set "PATH=%ProgramFiles%\NASM;%PATH%"
+        set "PATH=%LOCALAPPDATA%\bin\NASM;%PATH%"
+    ) || (
+        echo       winget not available. Downloading nasm...
+        powershell -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest 'https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/win64/nasm-2.16.03-win64.zip' -OutFile '%TEMP%\nasm.zip'; Expand-Archive '%TEMP%\nasm.zip' -DestinationPath '%LOCALAPPDATA%\nasm' -Force"
+        for /d %%d in ("%LOCALAPPDATA%\nasm\nasm-*") do set "PATH=%%d;%PATH%"
+    )
+)
+
+where nasm >nul 2>&1 && (
+    echo       nasm: found
+) || (
+    echo       nasm: not found (building without SIMD - slightly slower encoding)
+)
+echo.
+
+:: ── 3. Build ─────────────────────────────────────────────────
+
+echo [3/5] Building desk-switch (release)...
 echo       This takes a few minutes the first time. Please wait...
 echo.
 cargo build --release 2>&1
@@ -53,19 +99,24 @@ if not exist "target\release\desk-switch.exe" (
     echo.
     echo ERROR: Build failed. The binary was not created.
     echo        Check the errors above.
+    echo.
+    echo        Common fix: install cmake and nasm manually:
+    echo          winget install Kitware.CMake
+    echo          winget install NASM.NASM
+    echo        Then close this window, open a NEW terminal, and try again.
     goto :fail
 )
 echo.
 echo       Build complete.
 echo.
 
-:: ── 3. Install to AppData + Desktop shortcut ─────────────────
+:: ── 4. Install to AppData + Desktop shortcut ─────────────────
 
 set "INSTALL_DIR=%LOCALAPPDATA%\DeskSwitch"
 set "EXE_SRC=target\release\desk-switch.exe"
 set "EXE_DST=%INSTALL_DIR%\desk-switch.exe"
 
-echo [3/4] Installing to %INSTALL_DIR%...
+echo [4/5] Installing to %INSTALL_DIR%...
 
 if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
 copy /y "%EXE_SRC%" "%EXE_DST%" >nul
@@ -85,12 +136,17 @@ powershell -ExecutionPolicy Bypass -Command "$ws = New-Object -ComObject WScript
 echo       Installed. Shortcut on Desktop + Start Menu.
 echo.
 
-:: ── 4. Firewall rules ────────────────────────────────────────
+:: ── 5. Firewall rules ────────────────────────────────────────
 
-echo [4/4] Adding firewall rules...
+echo [5/5] Adding firewall rules...
+netsh advfirewall firewall delete rule name=DeskSwitch-TCP >nul 2>&1
+netsh advfirewall firewall delete rule name=DeskSwitch-UDP >nul 2>&1
 netsh advfirewall firewall add rule name=DeskSwitch-TCP dir=in action=allow protocol=TCP localport=9876-9877 >nul 2>&1
 netsh advfirewall firewall add rule name=DeskSwitch-UDP dir=in action=allow protocol=UDP localport=9876-9877 >nul 2>&1
-echo       Firewall rules added (or already existed).
+netsh advfirewall firewall add rule name=DeskSwitch-TCP-Out dir=out action=allow protocol=TCP remoteport=9876-9877 >nul 2>&1
+netsh advfirewall firewall add rule name=DeskSwitch-UDP-Out dir=out action=allow protocol=UDP remoteport=9876-9877 >nul 2>&1
+netsh advfirewall firewall add rule name=DeskSwitch-App dir=in action=allow program="%EXE_DST%" >nul 2>&1
+echo       Firewall rules added (inbound + outbound).
 
 echo.
 echo ══════════════════════════════════════════
@@ -100,11 +156,11 @@ echo   - Desktop shortcut: "Desk Switch"
 echo   - Start Menu: "Desk Switch"
 echo   - Install path: %INSTALL_DIR%
 echo.
-echo   The app starts in MIRROR mode by default.
-echo   For EXTENDED display (3rd screen), you
-echo   need the Virtual Display Driver:
-echo   https://github.com/VirtualDrivers/Virtual-Display-Driver/releases
-echo   (toggle in Settings once installed)
+echo   HOW TO USE AS 3RD SCREEN:
+echo   1. On Mac: Start as Primary
+echo   2. On Windows: Start as Display
+echo   3. Mac creates a virtual display that
+echo      Windows shows as a 3rd screen
 echo ══════════════════════════════════════════
 echo.
 
