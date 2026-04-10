@@ -125,9 +125,10 @@ impl DeskSwitchApp {
             }
         };
 
-        // Always ensure firewall exception on macOS (can get revoked after app updates)
         #[cfg(target_os = "macos")]
         {
+            crate::platform::macos::ensure_screen_recording();
+
             std::thread::spawn(|| {
                 crate::platform::macos::add_firewall_exception();
             });
@@ -258,7 +259,24 @@ impl DeskSwitchApp {
         ) {
             Ok(c) => c,
             Err(e) => {
-                self.push_log(format!("Capture error: {}", e));
+                let err_msg = format!("{}", e);
+                #[cfg(target_os = "macos")]
+                {
+                    if err_msg.contains("other error") || err_msg.contains("Failed to create capturer") {
+                        self.push_log("ERROR: Screen Recording permission not granted!");
+                        self.push_log("Go to System Preferences → Privacy & Security → Screen Recording");
+                        self.push_log("Add and enable 'Desk Switch', then restart the app.");
+                        let _ = std::process::Command::new("open")
+                            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+                            .spawn();
+                    } else {
+                        self.push_log(format!("Capture error: {}", e));
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    self.push_log(format!("Capture error: {}", err_msg));
+                }
                 self.virtual_monitor = None;
                 self.mode = AppMode::Idle;
                 return;

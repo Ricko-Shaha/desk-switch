@@ -2,8 +2,47 @@ use anyhow::Result;
 use log::{info, warn};
 use std::process::Command;
 
+extern "C" {
+    fn CGPreflightScreenCaptureAccess() -> bool;
+    fn CGRequestScreenCaptureAccess() -> bool;
+}
+
+/// Returns true if the app already has screen recording permission.
+pub fn has_screen_recording_permission() -> bool {
+    unsafe { CGPreflightScreenCaptureAccess() }
+}
+
+/// Triggers the macOS screen recording permission prompt.
+/// Returns true if access was already granted (it does NOT block waiting).
+pub fn request_screen_recording_permission() -> bool {
+    unsafe { CGRequestScreenCaptureAccess() }
+}
+
+/// Check and request screen recording permission.
+/// If not granted, opens the Screen Recording privacy pane so the user can enable it.
+pub fn ensure_screen_recording() {
+    if has_screen_recording_permission() {
+        info!("Screen recording permission: granted");
+        return;
+    }
+
+    warn!("Screen recording permission not granted — requesting...");
+    request_screen_recording_permission();
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    if !has_screen_recording_permission() {
+        warn!("Screen recording still not granted. Opening System Preferences...");
+        let _ = Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+            .spawn();
+    }
+}
+
 pub fn setup_permissions() -> Result<()> {
     info!("Running macOS permissions setup");
+
+    ensure_screen_recording();
 
     let _ = Command::new("open")
         .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")

@@ -209,20 +209,27 @@ fi
 
 echo "       App created at: ${APP_DIR}"
 
-# ── 5. Launch ────────────────────────────────────────────────
+# ── 6. Launch ────────────────────────────────────────────────
 
 echo "[6/6] Launching Desk Switch..."
 echo ""
-echo "╔══════════════════════════════════════════╗"
-echo "║  Installation complete!                  ║"
-echo "║                                          ║"
-echo "║  The app is in: ~/Applications/          ║"
-echo "║  You can also find it in Launchpad.      ║"
-echo "║                                          ║"
-echo "║  First time? The auth key is printed     ║"
-echo "║  in the app — copy it to the other       ║"
-echo "║  machine so they can connect.            ║"
-echo "╚══════════════════════════════════════════╝"
+echo "╔══════════════════════════════════════════════════╗"
+echo "║  Installation complete!                         ║"
+echo "║                                                 ║"
+echo "║  IMPORTANT — Grant these macOS permissions:     ║"
+echo "║                                                 ║"
+echo "║  1. Screen Recording  (required to capture      ║"
+echo "║     displays when running as Primary)            ║"
+echo "║                                                 ║"
+echo "║  2. Accessibility  (required for input control) ║"
+echo "║                                                 ║"
+echo "║  The app will prompt you on first launch.       ║"
+echo "║  If it doesn't, go to:                          ║"
+echo "║    System Preferences → Privacy & Security      ║"
+echo "║    → Screen Recording → enable Desk Switch      ║"
+echo "║                                                 ║"
+echo "║  After granting permission, RESTART the app.    ║"
+echo "╚══════════════════════════════════════════════════╝"
 echo ""
 
 open "${APP_DIR}"

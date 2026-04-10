@@ -134,12 +134,23 @@ impl Service {
 
     async fn run_primary(&self) -> Result<()> {
         info!("=== PRIMARY MODE ===");
+
+        #[cfg(target_os = "macos")]
+        {
+            if !crate::platform::macos::has_screen_recording_permission() {
+                warn!("Screen Recording permission not granted — requesting...");
+                crate::platform::macos::ensure_screen_recording();
+                return Err(anyhow!(
+                    "Screen Recording permission required. Grant it in System Preferences → Privacy & Security → Screen Recording, then restart."
+                ));
+            }
+        }
+
         info!(
             "Capturing monitor {} at quality {} (max {} FPS)",
             self.config.capture_monitor, self.config.capture_quality, self.config.max_fps
         );
 
-        // Start screen capture pipeline
         let mut capture = CaptureSession::start(
             self.config.capture_monitor,
             self.config.capture_quality,
