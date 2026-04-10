@@ -100,6 +100,7 @@ fn decode_loop(
     info!("JPEG decoder stopped");
 }
 
+#[cfg(feature = "fast-jpeg")]
 fn decode_jpeg(jpeg_data: &[u8]) -> Result<DecodedFrame, Box<dyn std::error::Error>> {
     let header = turbojpeg::read_header(jpeg_data)?;
     let width = header.width;
@@ -115,6 +116,33 @@ fn decode_jpeg(jpeg_data: &[u8]) -> Result<DecodedFrame, Box<dyn std::error::Err
         format: turbojpeg::PixelFormat::RGB,
     };
     decompressor.decompress(jpeg_data, image)?;
+
+    let pixels: Vec<u32> = rgb_data
+        .chunks_exact(3)
+        .map(|rgb| ((rgb[0] as u32) << 16) | ((rgb[1] as u32) << 8) | (rgb[2] as u32))
+        .collect();
+
+    Ok(DecodedFrame {
+        width,
+        height,
+        pixels,
+    })
+}
+
+#[cfg(not(feature = "fast-jpeg"))]
+fn decode_jpeg(jpeg_data: &[u8]) -> Result<DecodedFrame, Box<dyn std::error::Error>> {
+    use image::codecs::jpeg::JpegDecoder;
+    use image::ImageDecoder;
+    use std::io::Cursor;
+
+    let cursor = Cursor::new(jpeg_data);
+    let decoder = JpegDecoder::new(cursor)?;
+    let (width, height) = decoder.dimensions();
+    let width = width as usize;
+    let height = height as usize;
+
+    let mut rgb_data = vec![0u8; decoder.total_bytes() as usize];
+    decoder.read_image(&mut rgb_data)?;
 
     let pixels: Vec<u32> = rgb_data
         .chunks_exact(3)

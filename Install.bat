@@ -97,13 +97,14 @@ echo.
 cargo build --release 2>&1
 if not exist "target\release\desk-switch.exe" (
     echo.
+    echo       Fast JPEG build failed (missing cmake/nasm). Building with fallback...
+    echo.
+    cargo build --release --no-default-features 2>&1
+)
+if not exist "target\release\desk-switch.exe" (
+    echo.
     echo ERROR: Build failed. The binary was not created.
     echo        Check the errors above.
-    echo.
-    echo        Common fix: install cmake and nasm manually:
-    echo          winget install Kitware.CMake
-    echo          winget install NASM.NASM
-    echo        Then close this window, open a NEW terminal, and try again.
     goto :fail
 )
 echo.

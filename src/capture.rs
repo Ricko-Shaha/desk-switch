@@ -136,6 +136,7 @@ fn capture_loop(
     Ok(())
 }
 
+#[cfg(feature = "fast-jpeg")]
 fn encode_loop(
     quality: u8,
     raw_rx: Receiver<RawFrame>,
@@ -203,6 +204,73 @@ fn encode_loop(
     }
 
     info!("turbojpeg encoder stopped");
+}
+
+#[cfg(not(feature = "fast-jpeg"))]
+fn encode_loop(
+    quality: u8,
+    raw_rx: Receiver<RawFrame>,
+    frame_tx: Sender<CapturedFrame>,
+    running: Arc<AtomicBool>,
+) {
+    use image::codecs::jpeg::JpegEncoder;
+    use image::{ColorType, ImageEncoder};
+    use std::io::Cursor;
+
+    info!("image crate JPEG encoder started (quality: {})", quality);
+
+    while running.load(Ordering::Relaxed) {
+        match raw_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(raw) => {
+                let start = Instant::now();
+
+                let pixel_count = raw.width * raw.height;
+                let mut rgb_data = Vec::with_capacity(pixel_count * 3);
+                for pixel in raw.bgra_data.chunks_exact(4) {
+                    rgb_data.push(pixel[2]); // R
+                    rgb_data.push(pixel[1]); // G
+                    rgb_data.push(pixel[0]); // B
+                }
+
+                let mut jpeg_buf = Cursor::new(Vec::with_capacity(256 * 1024));
+                let encoder = JpegEncoder::new_with_quality(&mut jpeg_buf, quality);
+
+                match encoder.write_image(
+                    &rgb_data,
+                    raw.width as u32,
+                    raw.height as u32,
+                    ColorType::Rgb8.into(),
+                ) {
+                    Ok(()) => {
+                        let jpeg_data = jpeg_buf.into_inner();
+                        debug!(
+                            "Encoded frame: {}x{} -> {} KB in {:?}",
+                            raw.width, raw.height, jpeg_data.len() / 1024, start.elapsed()
+                        );
+
+                        let frame = CapturedFrame {
+                            width: raw.width as u16,
+                            height: raw.height as u16,
+                            jpeg_data,
+                        };
+
+                        match frame_tx.try_send(frame) {
+                            Ok(()) => {}
+                            Err(TrySendError::Full(_)) => {
+                                debug!("Network sender busy, dropping encoded frame");
+                            }
+                            Err(TrySendError::Disconnected(_)) => break,
+                        }
+                    }
+                    Err(e) => warn!("JPEG encode error: {}", e),
+                }
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    info!("JPEG encoder stopped");
 }
 
 pub fn list_displays() -> Vec<String> {
