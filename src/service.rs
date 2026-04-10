@@ -138,11 +138,7 @@ impl Service {
         #[cfg(target_os = "macos")]
         {
             if !crate::platform::macos::has_screen_recording_permission() {
-                warn!("Screen Recording permission not granted — requesting...");
-                crate::platform::macos::ensure_screen_recording();
-                return Err(anyhow!(
-                    "Screen Recording permission required. Grant it in System Preferences → Privacy & Security → Screen Recording, then restart."
-                ));
+                warn!("Screen Recording permission not granted via CGPreflight — trying capture anyway...");
             }
         }
 

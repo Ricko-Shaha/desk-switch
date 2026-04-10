@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
 use log::{debug, info, warn};
 use scrap::{Capturer, Display};
@@ -14,52 +14,39 @@ pub struct CapturedFrame {
     pub jpeg_data: Vec<u8>,
 }
 
-pub struct RawFrame {
-    pub width: usize,
-    pub height: usize,
-    pub bgra_data: Vec<u8>,
+#[allow(dead_code)]
+struct RawFrame {
+    width: usize,
+    height: usize,
+    bgra_data: Vec<u8>,
 }
 
 pub struct CaptureSession {
     pub frame_rx: Receiver<CapturedFrame>,
     running: Arc<AtomicBool>,
-    capture_handle: Option<thread::JoinHandle<()>>,
-    encode_handle: Option<thread::JoinHandle<()>>,
+    handles: Vec<thread::JoinHandle<()>>,
 }
 
 impl CaptureSession {
     pub fn start(monitor_index: usize, quality: u8, max_fps: u32) -> Result<Self> {
         let running = Arc::new(AtomicBool::new(true));
-
-        let (raw_tx, raw_rx): (Sender<RawFrame>, Receiver<RawFrame>) = bounded(2);
         let (frame_tx, frame_rx): (Sender<CapturedFrame>, Receiver<CapturedFrame>) = bounded(2);
 
-        let running_capture = running.clone();
-        let capture_handle = thread::spawn(move || {
-            if let Err(e) = capture_loop(monitor_index, max_fps, raw_tx, running_capture) {
-                warn!("Capture loop ended: {}", e);
-            }
-        });
-
-        let running_encode = running.clone();
-        let encode_handle = thread::spawn(move || {
-            encode_loop(quality, raw_rx, frame_tx, running_encode);
+        let running_c = running.clone();
+        let h = thread::spawn(move || {
+            capture_and_encode_loop(monitor_index, quality, max_fps, frame_tx, running_c);
         });
 
         Ok(Self {
             frame_rx,
             running,
-            capture_handle: Some(capture_handle),
-            encode_handle: Some(encode_handle),
+            handles: vec![h],
         })
     }
 
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::Relaxed);
-        if let Some(h) = self.capture_handle.take() {
-            let _ = h.join();
-        }
-        if let Some(h) = self.encode_handle.take() {
+        for h in self.handles.drain(..) {
             let _ = h.join();
         }
         info!("Capture session stopped");
@@ -72,19 +59,23 @@ impl Drop for CaptureSession {
     }
 }
 
-fn capture_loop(
+fn capture_and_encode_loop(
     monitor_index: usize,
+    quality: u8,
     max_fps: u32,
-    raw_tx: Sender<RawFrame>,
+    frame_tx: Sender<CapturedFrame>,
     running: Arc<AtomicBool>,
-) -> Result<()> {
-    let displays = Display::all().map_err(|e| anyhow!("Failed to enumerate displays: {}", e))?;
+) {
+    let displays = match Display::all() {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("Failed to enumerate displays: {}", e);
+            return;
+        }
+    };
     if monitor_index >= displays.len() {
-        return Err(anyhow!(
-            "Monitor index {} out of range (found {} displays)",
-            monitor_index,
-            displays.len()
-        ));
+        warn!("Monitor index {} out of range (found {})", monitor_index, displays.len());
+        return;
     }
 
     let display = displays.into_iter().nth(monitor_index).unwrap();
@@ -92,10 +83,47 @@ fn capture_loop(
     let height = display.height();
     info!("Capturing display {} ({}x{})", monitor_index, width, height);
 
-    let mut capturer =
-        Capturer::new(display).map_err(|e| anyhow!("Failed to create capturer: {}", e))?;
+    match Capturer::new(display) {
+        Ok(capturer) => {
+            info!("Using scrap (fast) capture");
+            scrap_capture_encode(capturer, width, height, quality, max_fps, &frame_tx, &running);
+        }
+        Err(e) => {
+            warn!("scrap capture failed: {}", e);
+            #[cfg(target_os = "macos")]
+            {
+                info!("Falling back to screencapture (slower but no permission needed)");
+                screencapture_loop(width, height, max_fps, &frame_tx, &running);
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                warn!("No fallback capture available on this platform");
+            }
+        }
+    }
+}
 
+fn scrap_capture_encode(
+    mut capturer: Capturer,
+    width: usize,
+    height: usize,
+    quality: u8,
+    max_fps: u32,
+    frame_tx: &Sender<CapturedFrame>,
+    running: &Arc<AtomicBool>,
+) {
     let frame_interval = Duration::from_micros(1_000_000 / max_fps as u64);
+
+    #[cfg(feature = "fast-jpeg")]
+    let mut compressor = {
+        let mut c = match turbojpeg::Compressor::new() {
+            Ok(c) => c,
+            Err(e) => { warn!("turbojpeg compressor failed: {}", e); return; }
+        };
+        let _ = c.set_quality(quality as i32);
+        let _ = c.set_subsamp(turbojpeg::Subsamp::Sub2x2);
+        c
+    };
 
     while running.load(Ordering::Relaxed) {
         let start = Instant::now();
@@ -103,18 +131,49 @@ fn capture_loop(
         match capturer.frame() {
             Ok(frame) => {
                 let bgra_data = frame.to_vec();
-                let raw = RawFrame {
-                    width,
-                    height,
-                    bgra_data,
+
+                #[cfg(feature = "fast-jpeg")]
+                let jpeg_result = {
+                    let image = turbojpeg::Image {
+                        pixels: bgra_data.as_slice(),
+                        width,
+                        pitch: width * 4,
+                        height,
+                        format: turbojpeg::PixelFormat::BGRA,
+                    };
+                    compressor.compress_to_vec(image).ok()
                 };
 
-                match raw_tx.try_send(raw) {
-                    Ok(()) => {}
-                    Err(TrySendError::Full(_)) => {
-                        debug!("Encoder busy, dropping frame");
+                #[cfg(not(feature = "fast-jpeg"))]
+                let jpeg_result = {
+                    use image::codecs::jpeg::JpegEncoder;
+                    use image::{ColorType, ImageEncoder};
+                    use std::io::Cursor;
+
+                    let mut rgb = Vec::with_capacity(width * height * 3);
+                    for px in bgra_data.chunks_exact(4) {
+                        rgb.push(px[2]);
+                        rgb.push(px[1]);
+                        rgb.push(px[0]);
                     }
-                    Err(TrySendError::Disconnected(_)) => break,
+                    let mut buf = Cursor::new(Vec::with_capacity(256 * 1024));
+                    let enc = JpegEncoder::new_with_quality(&mut buf, quality);
+                    enc.write_image(&rgb, width as u32, height as u32, ColorType::Rgb8.into())
+                        .ok()
+                        .map(|_| buf.into_inner())
+                };
+
+                if let Some(jpeg_data) = jpeg_result {
+                    let cf = CapturedFrame {
+                        width: width as u16,
+                        height: height as u16,
+                        jpeg_data,
+                    };
+                    match frame_tx.try_send(cf) {
+                        Ok(()) => {}
+                        Err(TrySendError::Full(_)) => { debug!("Network busy, dropping frame"); }
+                        Err(TrySendError::Disconnected(_)) => break,
+                    }
                 }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -133,144 +192,63 @@ fn capture_loop(
         }
     }
 
-    Ok(())
+    info!("scrap capture stopped");
 }
 
-#[cfg(feature = "fast-jpeg")]
-fn encode_loop(
-    quality: u8,
-    raw_rx: Receiver<RawFrame>,
-    frame_tx: Sender<CapturedFrame>,
-    running: Arc<AtomicBool>,
+#[cfg(target_os = "macos")]
+fn screencapture_loop(
+    width: usize,
+    height: usize,
+    max_fps: u32,
+    frame_tx: &Sender<CapturedFrame>,
+    running: &Arc<AtomicBool>,
 ) {
-    info!("turbojpeg encoder started (quality: {})", quality);
+    let tmp_path = "/tmp/.deskswitch_capture.jpg";
+    let effective_fps = max_fps.min(8);
+    let frame_interval = Duration::from_millis(1000 / effective_fps as u64);
 
-    let mut compressor = match turbojpeg::Compressor::new() {
-        Ok(c) => c,
-        Err(e) => {
-            warn!("Failed to create turbojpeg compressor: {}", e);
-            return;
-        }
-    };
-    let _ = compressor.set_quality(quality as i32);
-    let _ = compressor.set_subsamp(turbojpeg::Subsamp::Sub2x2);
+    info!("screencapture fallback started (target: ~{} FPS)", effective_fps);
 
     while running.load(Ordering::Relaxed) {
-        match raw_rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(raw) => {
-                let start = Instant::now();
+        let start = Instant::now();
 
-                let image = turbojpeg::Image {
-                    pixels: raw.bgra_data.as_slice(),
-                    width: raw.width,
-                    pitch: raw.width * 4,
-                    height: raw.height,
-                    format: turbojpeg::PixelFormat::BGRA,
-                };
+        let output = std::process::Command::new("screencapture")
+            .args(["-x", "-t", "jpg", tmp_path])
+            .output();
 
-                match compressor.compress_to_vec(image) {
-                    Ok(jpeg_data) => {
-                        let encode_time = start.elapsed();
-                        debug!(
-                            "Encoded frame: {}x{} -> {} KB in {:?}",
-                            raw.width,
-                            raw.height,
-                            jpeg_data.len() / 1024,
-                            encode_time
-                        );
-
-                        let frame = CapturedFrame {
-                            width: raw.width as u16,
-                            height: raw.height as u16,
-                            jpeg_data,
-                        };
-
-                        match frame_tx.try_send(frame) {
-                            Ok(()) => {}
-                            Err(TrySendError::Full(_)) => {
-                                debug!("Network sender busy, dropping encoded frame");
-                            }
-                            Err(TrySendError::Disconnected(_)) => break,
-                        }
-                    }
-                    Err(e) => {
-                        warn!("JPEG encode error: {}", e);
+        match output {
+            Ok(o) if o.status.success() => {
+                if let Ok(jpeg_data) = std::fs::read(tmp_path) {
+                    let frame = CapturedFrame {
+                        width: width as u16,
+                        height: height as u16,
+                        jpeg_data,
+                    };
+                    match frame_tx.try_send(frame) {
+                        Ok(()) => {}
+                        Err(TrySendError::Full(_)) => { debug!("Network busy, dropping frame"); }
+                        Err(TrySendError::Disconnected(_)) => break,
                     }
                 }
             }
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-        }
-    }
-
-    info!("turbojpeg encoder stopped");
-}
-
-#[cfg(not(feature = "fast-jpeg"))]
-fn encode_loop(
-    quality: u8,
-    raw_rx: Receiver<RawFrame>,
-    frame_tx: Sender<CapturedFrame>,
-    running: Arc<AtomicBool>,
-) {
-    use image::codecs::jpeg::JpegEncoder;
-    use image::{ColorType, ImageEncoder};
-    use std::io::Cursor;
-
-    info!("image crate JPEG encoder started (quality: {})", quality);
-
-    while running.load(Ordering::Relaxed) {
-        match raw_rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(raw) => {
-                let start = Instant::now();
-
-                let pixel_count = raw.width * raw.height;
-                let mut rgb_data = Vec::with_capacity(pixel_count * 3);
-                for pixel in raw.bgra_data.chunks_exact(4) {
-                    rgb_data.push(pixel[2]); // R
-                    rgb_data.push(pixel[1]); // G
-                    rgb_data.push(pixel[0]); // B
-                }
-
-                let mut jpeg_buf = Cursor::new(Vec::with_capacity(256 * 1024));
-                let encoder = JpegEncoder::new_with_quality(&mut jpeg_buf, quality);
-
-                match encoder.write_image(
-                    &rgb_data,
-                    raw.width as u32,
-                    raw.height as u32,
-                    ColorType::Rgb8.into(),
-                ) {
-                    Ok(()) => {
-                        let jpeg_data = jpeg_buf.into_inner();
-                        debug!(
-                            "Encoded frame: {}x{} -> {} KB in {:?}",
-                            raw.width, raw.height, jpeg_data.len() / 1024, start.elapsed()
-                        );
-
-                        let frame = CapturedFrame {
-                            width: raw.width as u16,
-                            height: raw.height as u16,
-                            jpeg_data,
-                        };
-
-                        match frame_tx.try_send(frame) {
-                            Ok(()) => {}
-                            Err(TrySendError::Full(_)) => {
-                                debug!("Network sender busy, dropping encoded frame");
-                            }
-                            Err(TrySendError::Disconnected(_)) => break,
-                        }
-                    }
-                    Err(e) => warn!("JPEG encode error: {}", e),
-                }
+            Ok(o) => {
+                warn!("screencapture failed: {}", String::from_utf8_lossy(&o.stderr));
+                thread::sleep(Duration::from_secs(1));
             }
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+            Err(e) => {
+                warn!("screencapture error: {}", e);
+                thread::sleep(Duration::from_secs(1));
+            }
+        }
+
+        let elapsed = start.elapsed();
+        if elapsed < frame_interval {
+            thread::sleep(frame_interval - elapsed);
         }
     }
 
-    info!("JPEG encoder stopped");
+    std::fs::remove_file(tmp_path).ok();
+    info!("screencapture fallback stopped");
 }
 
 pub fn list_displays() -> Vec<String> {
