@@ -79,6 +79,11 @@ if [ -f helpers/virtual-display-helper-bin ]; then
     echo "       Virtual display helper included."
 fi
 
+# Ad-hoc sign the binary so macOS firewall accepts it
+echo "       Code signing..."
+codesign --force --sign - "${APP_DIR}/Contents/MacOS/desk-switch" 2>/dev/null && \
+    echo "       Binary signed." || echo "       Signing skipped (non-critical)."
+
 cat > "${APP_DIR}/Contents/Info.plist" << 'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"

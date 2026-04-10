@@ -200,5 +200,9 @@ pub fn start_listener(
 
 pub fn find_peer(peers: &PeerMap) -> Option<PeerInfo> {
     let peers = peers.lock().unwrap();
+    // Prefer peers advertising as "primary"
+    if let Some(p) = peers.values().find(|p| p.role == "primary") {
+        return Some(p.clone());
+    }
     peers.values().next().cloned()
 }

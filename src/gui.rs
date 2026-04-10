@@ -57,6 +57,7 @@ pub struct DeskSwitchApp {
 
     // Discovery threads
     discovery_running: bool,
+    discovery_role: Arc<Mutex<Role>>,
 
     // Primary mode
     virtual_monitor: Option<VirtualMonitor>,
@@ -141,6 +142,7 @@ impl DeskSwitchApp {
             running: Arc::new(AtomicBool::new(true)),
             peers: discovery::new_peer_map(),
             discovery_running: false,
+            discovery_role: Arc::new(Mutex::new(Role::Idle)),
             virtual_monitor: None,
             capture_session: None,
             primary_handle: None,
@@ -185,18 +187,21 @@ impl DeskSwitchApp {
         if self.discovery_running {
             return;
         }
-        let role = Arc::new(Mutex::new(Role::Idle));
         let running = self.running.clone();
         discovery::start_broadcast(
             self.config.discovery_port,
             self.config.hostname.clone(),
             self.config.stream_port,
-            role,
+            self.discovery_role.clone(),
             running.clone(),
         );
         discovery::start_listener(self.config.discovery_port, self.peers.clone(), running);
         self.discovery_running = true;
         self.push_log("Discovery started");
+    }
+
+    fn set_discovery_role(&self, role: Role) {
+        *self.discovery_role.lock().unwrap() = role;
     }
 
     fn peer_display_name(&self) -> Option<String> {
@@ -208,6 +213,7 @@ impl DeskSwitchApp {
     fn start_primary(&mut self) {
         self.ensure_discovery();
         self.mode = AppMode::Primary;
+        self.set_discovery_role(Role::Primary);
 
         let capture_monitor = if self.config.use_virtual_display {
             self.push_log(format!(
@@ -280,6 +286,7 @@ impl DeskSwitchApp {
     fn start_display(&mut self) {
         self.ensure_discovery();
         self.mode = AppMode::Display;
+        self.set_discovery_role(Role::Display);
         self.push_log("Starting DISPLAY mode — searching for primary...");
 
         let (pixel_tx, pixel_rx) = bounded::<DecodedFrame>(2);
@@ -309,6 +316,7 @@ impl DeskSwitchApp {
 
     fn stop(&mut self) {
         self.push_log("Stopping...");
+        self.set_discovery_role(Role::Idle);
         self.running.store(false, Ordering::Relaxed);
 
         if let Some(mut cap) = self.capture_session.take() {
@@ -649,10 +657,12 @@ impl DeskSwitchApp {
                 ui.add_space(4.0);
                 stat_row(ui, "FPS", &fps.to_string());
                 stat_row(ui, "Quality", &format!("{}%", self.config.capture_quality));
+
+                let local_ip = discovery::get_local_ip();
                 stat_row(
                     ui,
-                    "Monitor",
-                    &format!("Display {}", self.config.capture_monitor),
+                    "Your IP",
+                    &format!("{}:{}", local_ip, self.config.stream_port),
                 );
             });
         });
@@ -882,7 +892,7 @@ impl DeskSwitchApp {
                 let displays = capture::list_displays();
                 let mut monitor = self.config.capture_monitor;
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Monitor").color(TEXT_DIM).font(FontId::proportional(13.0)));
+                    ui.label(RichText::new("Capture Monitor (mirror mode)").color(TEXT_DIM).font(FontId::proportional(13.0)));
                     ui.add_space(12.0);
                     egui::ComboBox::from_id_salt("monitor_select")
                         .selected_text(
@@ -898,6 +908,16 @@ impl DeskSwitchApp {
                         });
                 });
                 self.config.capture_monitor = monitor;
+                if !self.config.use_virtual_display {
+                    ui.label(
+                        RichText::new(
+                            "Tip: Display 0 is usually the primary/laptop screen. \
+                             Change this if the wrong screen is being mirrored.",
+                        )
+                        .color(TEXT_DIM)
+                        .font(FontId::proportional(11.0)),
+                    );
+                }
 
                 ui.add_space(12.0);
                 ui.separator();
@@ -1327,30 +1347,39 @@ fn primary_network_loop(
     peer_name: Arc<Mutex<Option<String>>>,
     log_tx: Sender<String>,
 ) {
-    let listener = match std::net::TcpListener::bind(format!("0.0.0.0:{}", port)) {
+    // Use socket2 for SO_REUSEADDR to avoid "address already in use" on quick restart
+    let listener = match (|| -> std::io::Result<std::net::TcpListener> {
+        let sock = socket2::Socket::new(
+            socket2::Domain::IPV4,
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        )?;
+        sock.set_reuse_address(true)?;
+        #[cfg(target_os = "macos")]
+        sock.set_reuse_port(true)?;
+        sock.bind(&format!("0.0.0.0:{}", port).parse::<std::net::SocketAddr>().unwrap().into())?;
+        sock.listen(4)?;
+        sock.set_nonblocking(true)?;
+        Ok(sock.into())
+    })() {
         Ok(l) => l,
         Err(e) => {
-            let _ = log_tx.try_send(format!("Bind error on port {}: {}", port, e));
+            let _ = log_tx.try_send(format!("BIND FAILED on port {}: {} — is another instance running?", port, e));
             return;
         }
     };
-    listener
-        .set_nonblocking(false)
-        .ok();
-    let _ = listener.set_nonblocking(false);
-    let _ = log_tx.try_send(format!("Listening on port {}", port));
 
-    // Set a timeout so we can check the running flag
-    let _ = listener.set_nonblocking(true);
+    // Report the local IPs so the user knows what to connect to
+    let local_ip = crate::discovery::get_local_ip();
+    let _ = log_tx.try_send(format!("✓ Listening on {}:{} — waiting for display to connect", local_ip, port));
 
     let mut fps_count = 0u32;
     let mut fps_timer = Instant::now();
 
     while running.load(Ordering::Relaxed) {
-        // Try accept
         match listener.accept() {
             Ok((stream, addr)) => {
-                let _ = log_tx.try_send(format!("Display connected from {}", addr));
+                let _ = log_tx.try_send(format!("Display connecting from {}", addr));
                 stream.set_nonblocking(false).ok();
                 let stream2 = match stream.try_clone() {
                     Ok(s) => s,
@@ -1434,31 +1463,41 @@ fn display_network_loop(
     let mut fps_count = 0u32;
     let mut fps_timer = Instant::now();
 
+    let mut search_logged = false;
+
     while running.load(Ordering::Relaxed) {
-        // Find a peer
         let peer = match discovery::find_peer(&peers) {
-            Some(p) => p,
+            Some(p) => {
+                search_logged = false;
+                p
+            }
             None => {
+                if !search_logged {
+                    let _ = log_tx.try_send("Searching for primary on network...".to_string());
+                    search_logged = true;
+                }
                 thread::sleep(Duration::from_secs(1));
                 continue;
             }
         };
 
+        let target = format!("{}:{}", peer.ip, peer.stream_port);
         let _ = log_tx.try_send(format!(
-            "Connecting to {} ({}:{})...",
-            peer.hostname, peer.ip, peer.stream_port
+            "Found {} — connecting to {}...",
+            peer.hostname, target
         ));
 
         let stream = match TcpStream::connect_timeout(
-            &format!("{}:{}", peer.ip, peer.stream_port)
-                .parse()
-                .unwrap(),
+            &target.parse().unwrap(),
             Duration::from_secs(5),
         ) {
             Ok(s) => s,
             Err(e) => {
-                let _ = log_tx.try_send(format!("Connect failed: {}", e));
-                thread::sleep(Duration::from_secs(2));
+                let _ = log_tx.try_send(format!(
+                    "TCP connect to {} failed: {} — check firewall on primary machine",
+                    target, e
+                ));
+                thread::sleep(Duration::from_secs(3));
                 continue;
             }
         };
