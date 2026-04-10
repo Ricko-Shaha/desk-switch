@@ -1,6 +1,7 @@
 use crate::capture::{self, CaptureSession};
 use crate::config::{load_config, save_config, Config};
 use crate::discovery::{self, PeerMap};
+use crate::input::InputSimulator;
 use crate::protocol::{self, Message, Role, PROTOCOL_VERSION};
 use crate::virtual_display::VirtualMonitor;
 use crossbeam_channel::{bounded, Receiver, Sender};
@@ -283,6 +284,9 @@ impl DeskSwitchApp {
             }
         };
 
+        let (screen_w, screen_h) = capture::get_display_dimensions(capture_monitor);
+        self.push_log(format!("Capture dimensions: {}x{}", screen_w, screen_h));
+
         let frame_rx = capture.frame_rx.clone();
         let port = self.config.stream_port;
         let auth_hash = self.config.auth_hash();
@@ -292,7 +296,10 @@ impl DeskSwitchApp {
         let log_tx = self.log_tx.clone();
 
         let handle = thread::spawn(move || {
-            primary_network_loop(frame_rx, port, auth_hash, running, fps_counter, peer_name, log_tx);
+            primary_network_loop(
+                frame_rx, port, auth_hash, running, fps_counter, peer_name, log_tx,
+                screen_w, screen_h,
+            );
         });
 
         self.capture_session = Some(capture);
@@ -685,7 +692,57 @@ impl DeskSwitchApp {
             });
         });
 
-        ui.add_space(24.0);
+        ui.add_space(16.0);
+
+        // Screen arrangement guidance
+        if self.virtual_monitor.is_some() {
+            ui.vertical_centered(|ui| {
+                card(ui, Color32::from_rgb(20, 30, 50), |ui| {
+                    ui.label(
+                        RichText::new("Screen Arrangement")
+                            .color(TEXT)
+                            .font(FontId::proportional(14.0)),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(
+                            "A virtual display has been created. To position it\n\
+                             (left, right, above, below your other screens),\n\
+                             open your OS Display Settings and drag it into place.",
+                        )
+                        .color(TEXT_DIM)
+                        .font(FontId::proportional(12.0)),
+                    );
+                    ui.add_space(8.0);
+                    if styled_button(ui, "Open Display Settings", ACCENT_BLUE, ACCENT_BLUE_HOVER, 200.0)
+                        .clicked()
+                    {
+                        open_display_settings();
+                    }
+                });
+            });
+        } else {
+            ui.vertical_centered(|ui| {
+                card(ui, Color32::from_rgb(20, 30, 50), |ui| {
+                    ui.label(
+                        RichText::new("Mirror Mode")
+                            .color(YELLOW)
+                            .font(FontId::proportional(13.0)),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(
+                            "Streaming a copy of your screen. For a true 3rd screen,\n\
+                             enable Extended mode in Settings before starting.",
+                        )
+                        .color(TEXT_DIM)
+                        .font(FontId::proportional(11.0)),
+                    );
+                });
+            });
+        }
+
+        ui.add_space(16.0);
 
         // Action buttons
         ui.horizontal(|ui| {
@@ -988,7 +1045,8 @@ impl DeskSwitchApp {
                     ui.add_space(4.0);
                     ui.label(
                         RichText::new(
-                            "Creates a virtual monitor — the other laptop becomes an extra screen, not a mirror.",
+                            "Creates a virtual monitor — the other laptop becomes an extra screen, not a mirror.\n\
+                             After starting, use your OS Display Settings to arrange the screen position.",
                         )
                         .color(TEXT_DIM)
                         .font(FontId::proportional(11.0)),
@@ -1282,6 +1340,26 @@ fn stat_row(ui: &mut egui::Ui, label: &str, value: &str) {
     });
 }
 
+fn open_display_settings() {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.Displays-Settings.extension")
+            .spawn()
+            .or_else(|_| {
+                std::process::Command::new("open")
+                    .arg("/System/Applications/System Preferences.app")
+                    .spawn()
+            });
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "ms-settings:display"])
+            .spawn();
+    }
+}
+
 // ── Key Mapping ─────────────────────────────────────────────────────────────
 
 fn egui_key_to_code(key: &egui::Key) -> Option<u32> {
@@ -1364,8 +1442,9 @@ fn primary_network_loop(
     fps_counter: Arc<Mutex<u32>>,
     peer_name: Arc<Mutex<Option<String>>>,
     log_tx: Sender<String>,
+    screen_width: u32,
+    screen_height: u32,
 ) {
-    // Use socket2 for SO_REUSEADDR to avoid "address already in use" on quick restart
     let listener = match (|| -> std::io::Result<std::net::TcpListener> {
         let sock = socket2::Socket::new(
             socket2::Domain::IPV4,
@@ -1387,9 +1466,8 @@ fn primary_network_loop(
         }
     };
 
-    // Report the local IPs so the user knows what to connect to
     let local_ip = crate::discovery::get_local_ip();
-    let _ = log_tx.try_send(format!("✓ Listening on {}:{} — waiting for display to connect", local_ip, port));
+    let _ = log_tx.try_send(format!("Listening on {}:{} — waiting for display", local_ip, port));
 
     let mut fps_count = 0u32;
     let mut fps_timer = Instant::now();
@@ -1399,13 +1477,18 @@ fn primary_network_loop(
             Ok((stream, addr)) => {
                 let _ = log_tx.try_send(format!("Display connecting from {}", addr));
                 stream.set_nonblocking(false).ok();
-                let stream2 = match stream.try_clone() {
+
+                let stream_for_reader = match stream.try_clone() {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let shutdown_handle = match stream.try_clone() {
                     Ok(s) => s,
                     Err(_) => continue,
                 };
 
                 let mut writer = std::io::BufWriter::new(stream);
-                let mut reader = std::io::BufReader::new(stream2);
+                let mut reader = std::io::BufReader::new(stream_for_reader);
 
                 // Handshake
                 match protocol::read_message_sync(&mut reader) {
@@ -1423,12 +1506,36 @@ fn primary_network_loop(
                         let accept = Message::HandshakeAck { accepted: true };
                         let _ = protocol::write_message_sync(&mut writer, &accept);
                         *peer_name.lock().unwrap() = Some(hostname.clone());
-                        let _ = log_tx.try_send(format!("Authenticated: {}", hostname));
+                        let _ = log_tx.try_send(format!("Connected: {}", hostname));
                     }
                     _ => continue,
                 }
 
-                // Stream frames
+                // Spawn thread to read input messages from the Display and simulate them locally
+                let log_tx_input = log_tx.clone();
+                let sw = screen_width;
+                let sh = screen_height;
+                let input_thread = thread::spawn(move || {
+                    let mut sim = InputSimulator::new(sw, sh);
+                    let _ = log_tx_input.try_send(format!(
+                        "Input forwarding active ({}x{})", sw, sh
+                    ));
+                    loop {
+                        match protocol::read_message_sync(&mut reader) {
+                            Ok(ref msg @ Message::MouseMove { .. })
+                            | Ok(ref msg @ Message::MouseClick { .. })
+                            | Ok(ref msg @ Message::MouseScroll { .. })
+                            | Ok(ref msg @ Message::KeyEvent { .. }) => {
+                                sim.handle_message(msg);
+                            }
+                            Ok(Message::Heartbeat { .. }) => {}
+                            Ok(_) => {}
+                            Err(_) => break,
+                        }
+                    }
+                });
+
+                // Stream frames to the Display
                 while running.load(Ordering::Relaxed) {
                     match frame_rx.recv_timeout(Duration::from_millis(100)) {
                         Ok(frame) => {
@@ -1454,6 +1561,9 @@ fn primary_network_loop(
                     }
                 }
 
+                // Shut down the stream to unblock the input reader thread
+                let _ = shutdown_handle.shutdown(std::net::Shutdown::Both);
+                let _ = input_thread.join();
                 *peer_name.lock().unwrap() = None;
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {

@@ -251,6 +251,15 @@ fn screencapture_loop(
     info!("screencapture fallback stopped");
 }
 
+pub fn get_display_dimensions(monitor_index: usize) -> (u32, u32) {
+    match Display::all() {
+        Ok(displays) if monitor_index < displays.len() => {
+            (displays[monitor_index].width() as u32, displays[monitor_index].height() as u32)
+        }
+        _ => (1920, 1080),
+    }
+}
+
 pub fn list_displays() -> Vec<String> {
     match Display::all() {
         Ok(displays) => displays
