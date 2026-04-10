@@ -8,8 +8,8 @@ description = "Cross-platform KVM switch system for multi-laptop setups"
 # Screen capture
 scrap = "0.5"
 
-# Image encoding/decoding
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+# Fast JPEG encoding/decoding (libjpeg-turbo)
+turbojpeg = "1.1"
 
 # Windowing / viewer (CLI mode)
 minifb = "0.28"

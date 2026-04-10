@@ -17,8 +17,6 @@ pub struct VirtualMonitor {
 
 impl VirtualMonitor {
     pub fn create(width: u32, height: u32, refresh_rate: u32) -> Result<Self> {
-        let displays_before = crate::capture::list_displays();
-
         #[cfg(target_os = "macos")]
         let inner = macos::MacVirtualMonitor::create(width, height, refresh_rate)?;
 
@@ -31,15 +29,38 @@ impl VirtualMonitor {
             anyhow::bail!("Virtual displays are not supported on this platform");
         }
 
+        // Wait for OS to register the new display
         std::thread::sleep(std::time::Duration::from_secs(2));
 
-        let displays_after = crate::capture::list_displays();
-        let display_index = find_new_display(&displays_before, &displays_after)
-            .unwrap_or(displays_after.len().saturating_sub(1));
+        // Find the display index using platform-specific ID matching
+        #[cfg(target_os = "macos")]
+        let display_index = {
+            let target_id = inner.display_id;
+            find_display_index_by_cg_id(target_id).unwrap_or_else(|| {
+                log::warn!(
+                    "Could not find display ID {} in active list, using last display",
+                    target_id
+                );
+                let count = crate::capture::list_displays().len();
+                count.saturating_sub(1)
+            })
+        };
+
+        #[cfg(target_os = "windows")]
+        let display_index = {
+            let count = crate::capture::list_displays().len();
+            count.saturating_sub(1)
+        };
+
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let display_index = 0;
 
         log::info!(
             "Virtual monitor created ({}x{}@{}Hz) → display index {}",
-            width, height, refresh_rate, display_index
+            width,
+            height,
+            refresh_rate,
+            display_index
         );
 
         Ok(Self {
@@ -64,14 +85,40 @@ impl Drop for VirtualMonitor {
     }
 }
 
-fn find_new_display(before: &[String], after: &[String]) -> Option<usize> {
-    for (i, d) in after.iter().enumerate() {
-        if !before.contains(d) {
-            return Some(i);
+/// Use CoreGraphics CGGetActiveDisplayList to find the scrap index for a given CGDirectDisplayID.
+/// scrap uses the same ordering as CGGetActiveDisplayList internally.
+#[cfg(target_os = "macos")]
+fn find_display_index_by_cg_id(target_id: u32) -> Option<usize> {
+    extern "C" {
+        fn CGGetActiveDisplayList(
+            max_displays: u32,
+            active_displays: *mut u32,
+            display_count: *mut u32,
+        ) -> i32;
+    }
+
+    unsafe {
+        let mut count: u32 = 0;
+        let err = CGGetActiveDisplayList(0, std::ptr::null_mut(), &mut count);
+        if err != 0 || count == 0 {
+            return None;
         }
+
+        let mut displays = vec![0u32; count as usize];
+        let err = CGGetActiveDisplayList(count, displays.as_mut_ptr(), &mut count);
+        if err != 0 {
+            return None;
+        }
+
+        log::info!(
+            "Active displays ({}): {:?}, looking for ID {}",
+            count,
+            &displays[..count as usize],
+            target_id
+        );
+
+        displays[..count as usize]
+            .iter()
+            .position(|&id| id == target_id)
     }
-    if after.len() > before.len() {
-        return Some(after.len() - 1);
-    }
-    None
 }

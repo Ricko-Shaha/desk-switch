@@ -11,23 +11,46 @@ echo ""
 # ── 1. Check / Install Rust ──────────────────────────────────
 
 if ! command -v cargo &>/dev/null; then
-    echo "[1/4] Rust not found. Installing..."
+    echo "[1/6] Rust not found. Installing..."
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     source "$HOME/.cargo/env"
     echo "       Rust installed."
 else
-    echo "[1/4] Rust found: $(cargo --version)"
+    echo "[1/6] Rust found: $(cargo --version)"
 fi
 
-# ── 2. Build ─────────────────────────────────────────────────
+# ── 2. Check build dependencies (cmake, nasm for turbojpeg) ──
 
-echo "[2/5] Building desk-switch (release)... this takes a few minutes the first time."
+echo "[2/6] Checking build dependencies..."
+if ! command -v cmake &>/dev/null; then
+    echo "       Installing cmake..."
+    if command -v brew &>/dev/null; then
+        HOMEBREW_NO_AUTO_UPDATE=1 brew install cmake 2>/dev/null || \
+        pip3 install --break-system-packages cmake 2>/dev/null || \
+        pip3 install cmake 2>/dev/null
+    else
+        pip3 install --break-system-packages cmake 2>/dev/null || \
+        pip3 install cmake 2>/dev/null
+    fi
+fi
+if ! command -v nasm &>/dev/null; then
+    echo "       Installing nasm..."
+    if command -v brew &>/dev/null; then
+        HOMEBREW_NO_AUTO_UPDATE=1 brew install nasm 2>/dev/null || true
+    fi
+fi
+echo "       cmake: $(cmake --version 2>/dev/null | head -1 || echo 'not found')"
+echo "       nasm:  $(nasm --version 2>/dev/null || echo 'not found (SIMD disabled)')"
+
+# ── 3. Build ─────────────────────────────────────────────────
+
+echo "[3/6] Building desk-switch (release)... this takes a few minutes the first time."
 cargo build --release
 echo "       Build complete."
 
 # ── 3. Build virtual display helper ──────────────────────────
 
-echo "[3/5] Building virtual display helper..."
+echo "[4/6] Building virtual display helper..."
 if [ -f helpers/virtual-display-helper.m ]; then
     clang -framework Foundation -framework CoreGraphics \
         -o helpers/virtual-display-helper-bin \
@@ -43,7 +66,7 @@ fi
 APP_NAME="Desk Switch"
 APP_DIR="$HOME/Applications/${APP_NAME}.app"
 
-echo "[4/5] Creating ${APP_NAME}.app..."
+echo "[5/6] Creating ${APP_NAME}.app..."
 
 mkdir -p "${APP_DIR}/Contents/MacOS"
 mkdir -p "${APP_DIR}/Contents/Resources"
@@ -183,7 +206,7 @@ echo "       App created at: ${APP_DIR}"
 
 # ── 5. Launch ────────────────────────────────────────────────
 
-echo "[5/5] Launching Desk Switch..."
+echo "[6/6] Launching Desk Switch..."
 echo ""
 echo "╔══════════════════════════════════════════╗"
 echo "║  Installation complete!                  ║"

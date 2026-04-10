@@ -22,13 +22,15 @@ pub struct Config {
     pub virtual_display_width: u32,
     #[serde(default = "default_vd_height")]
     pub virtual_display_height: u32,
-    #[serde(default = "default_true")]
+    #[serde(default = "default_use_vd")]
     pub use_virtual_display: bool,
 }
 
 fn default_vd_width() -> u32 { 1920 }
 fn default_vd_height() -> u32 { 1080 }
-fn default_true() -> bool { true }
+fn default_use_vd() -> bool {
+    !cfg!(target_os = "windows")
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -42,13 +44,13 @@ impl Default for Config {
             auth_key: generate_auth_key(),
             stream_port: DEFAULT_STREAM_PORT,
             discovery_port: DEFAULT_DISCOVERY_PORT,
-            capture_quality: 60,
+            capture_quality: 80,
             capture_monitor: 0,
             viewer_monitor: 0,
-            max_fps: 30,
+            max_fps: 60,
             virtual_display_width: 1920,
             virtual_display_height: 1080,
-            use_virtual_display: true,
+            use_virtual_display: !cfg!(target_os = "windows"),
         }
     }
 }

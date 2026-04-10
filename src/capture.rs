@@ -1,10 +1,7 @@
 use anyhow::{anyhow, Result};
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
-use image::codecs::jpeg::JpegEncoder;
-use image::{ColorType, ImageEncoder};
 use log::{debug, info, warn};
 use scrap::{Capturer, Display};
-use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -121,7 +118,6 @@ fn capture_loop(
                 }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // Frame not ready yet, brief sleep
                 thread::sleep(Duration::from_millis(1));
                 continue;
             }
@@ -146,34 +142,33 @@ fn encode_loop(
     frame_tx: Sender<CapturedFrame>,
     running: Arc<AtomicBool>,
 ) {
-    info!("JPEG encoder started (quality: {})", quality);
+    info!("turbojpeg encoder started (quality: {})", quality);
+
+    let mut compressor = match turbojpeg::Compressor::new() {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("Failed to create turbojpeg compressor: {}", e);
+            return;
+        }
+    };
+    let _ = compressor.set_quality(quality as i32);
+    let _ = compressor.set_subsamp(turbojpeg::Subsamp::Sub2x2);
 
     while running.load(Ordering::Relaxed) {
         match raw_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(raw) => {
                 let start = Instant::now();
 
-                // Convert BGRA to RGB
-                let pixel_count = raw.width * raw.height;
-                let mut rgb_data = Vec::with_capacity(pixel_count * 3);
-                for pixel in raw.bgra_data.chunks_exact(4) {
-                    rgb_data.push(pixel[2]); // R
-                    rgb_data.push(pixel[1]); // G
-                    rgb_data.push(pixel[0]); // B
-                }
+                let image = turbojpeg::Image {
+                    pixels: raw.bgra_data.as_slice(),
+                    width: raw.width,
+                    pitch: raw.width * 4,
+                    height: raw.height,
+                    format: turbojpeg::PixelFormat::BGRA,
+                };
 
-                // Encode as JPEG
-                let mut jpeg_buf = Cursor::new(Vec::with_capacity(256 * 1024));
-                let encoder = JpegEncoder::new_with_quality(&mut jpeg_buf, quality);
-
-                match encoder.write_image(
-                    &rgb_data,
-                    raw.width as u32,
-                    raw.height as u32,
-                    ColorType::Rgb8.into(),
-                ) {
-                    Ok(()) => {
-                        let jpeg_data = jpeg_buf.into_inner();
+                match compressor.compress_to_vec(image) {
+                    Ok(jpeg_data) => {
                         let encode_time = start.elapsed();
                         debug!(
                             "Encoded frame: {}x{} -> {} KB in {:?}",
@@ -207,7 +202,7 @@ fn encode_loop(
         }
     }
 
-    info!("JPEG encoder stopped");
+    info!("turbojpeg encoder stopped");
 }
 
 pub fn list_displays() -> Vec<String> {

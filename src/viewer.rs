@@ -1,9 +1,6 @@
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
-use image::codecs::jpeg::JpegDecoder;
-use image::ImageDecoder;
 use log::{debug, info, warn};
 use minifb::{Key, Window, WindowOptions};
-use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -104,16 +101,21 @@ fn decode_loop(
 }
 
 fn decode_jpeg(jpeg_data: &[u8]) -> Result<DecodedFrame, Box<dyn std::error::Error>> {
-    let cursor = Cursor::new(jpeg_data);
-    let decoder = JpegDecoder::new(cursor)?;
-    let (width, height) = decoder.dimensions();
-    let width = width as usize;
-    let height = height as usize;
+    let header = turbojpeg::read_header(jpeg_data)?;
+    let width = header.width;
+    let height = header.height;
 
-    let mut rgb_data = vec![0u8; decoder.total_bytes() as usize];
-    decoder.read_image(&mut rgb_data)?;
+    let mut decompressor = turbojpeg::Decompressor::new()?;
+    let mut rgb_data = vec![0u8; width * height * 3];
+    let image = turbojpeg::Image {
+        pixels: rgb_data.as_mut_slice(),
+        width,
+        pitch: width * 3,
+        height,
+        format: turbojpeg::PixelFormat::RGB,
+    };
+    decompressor.decompress(jpeg_data, image)?;
 
-    // Convert RGB to u32 (0x00RRGGBB) for minifb
     let pixels: Vec<u32> = rgb_data
         .chunks_exact(3)
         .map(|rgb| ((rgb[0] as u32) << 16) | ((rgb[1] as u32) << 8) | (rgb[2] as u32))

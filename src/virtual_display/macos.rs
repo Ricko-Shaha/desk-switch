@@ -5,7 +5,6 @@ use std::process::{Child, Command, Stdio};
 
 pub struct MacVirtualMonitor {
     child: Option<Child>,
-    #[allow(dead_code)]
     pub display_id: u32,
 }
 

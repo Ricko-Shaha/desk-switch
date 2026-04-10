@@ -8,10 +8,7 @@ use eframe::egui::{
     self, Align2, Button, Color32, CornerRadius, FontId, Frame, Margin, Response, RichText, Sense,
     Stroke, TextureHandle, TextureOptions, Vec2,
 };
-use image::codecs::jpeg::JpegDecoder;
-use image::ImageDecoder;
 use log::info;
-use std::io::Cursor;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -123,10 +120,17 @@ impl DeskSwitchApp {
             Err(_) => {
                 let c = Config::default();
                 let _ = save_config(&c);
-                let _ = crate::platform::setup_permissions();
                 (c, true)
             }
         };
+
+        // Always ensure firewall exception on macOS (can get revoked after app updates)
+        #[cfg(target_os = "macos")]
+        {
+            std::thread::spawn(|| {
+                crate::platform::macos::add_firewall_exception();
+            });
+        }
 
         let (log_tx, log_rx) = bounded::<String>(256);
 
@@ -928,6 +932,20 @@ impl DeskSwitchApp {
                     }
                 });
 
+                #[cfg(target_os = "windows")]
+                if self.config.use_virtual_display {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(
+                            "⚠ Extended mode on Windows requires the Virtual Display Driver.\n\
+                             Install from: github.com/itsmikethetech/Virtual-Display-Driver/releases\n\
+                             Without it, the app will fall back to mirror mode.",
+                        )
+                        .color(Color32::from_rgb(255, 180, 50))
+                        .font(FontId::proportional(11.0)),
+                    );
+                }
+
                 if self.config.use_virtual_display {
                     ui.add_space(4.0);
                     ui.label(
@@ -1525,14 +1543,20 @@ fn display_network_loop(
 }
 
 fn decode_frame(jpeg_data: &[u8]) -> Option<DecodedFrame> {
-    let cursor = Cursor::new(jpeg_data);
-    let decoder = JpegDecoder::new(cursor).ok()?;
-    let (w, h) = decoder.dimensions();
-    let w = w as usize;
-    let h = h as usize;
+    let header = turbojpeg::read_header(jpeg_data).ok()?;
+    let w = header.width;
+    let h = header.height;
 
-    let mut rgb = vec![0u8; decoder.total_bytes() as usize];
-    decoder.read_image(&mut rgb).ok()?;
+    let mut decompressor = turbojpeg::Decompressor::new().ok()?;
+    let mut rgb = vec![0u8; w * h * 3];
+    let image = turbojpeg::Image {
+        pixels: rgb.as_mut_slice(),
+        width: w,
+        pitch: w * 3,
+        height: h,
+        format: turbojpeg::PixelFormat::RGB,
+    };
+    decompressor.decompress(jpeg_data, image).ok()?;
 
     let pixels: Vec<Color32> = rgb
         .chunks_exact(3)
